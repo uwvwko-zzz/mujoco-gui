@@ -1,0 +1,45 @@
+# Copy these sections into the target robot's existing simulation YAML.
+runtime_ui:
+  title: "My Robot MuJoCo Runtime Control"
+  host: 127.0.0.1
+  port: 8765
+  width: 640                  # MuJoCo render pixels; CSS enlarges the display
+  height: 480
+  fps: 120
+  jpeg_quality: 70
+  default_map: flat
+  maps:
+    flat: "Flat"
+    rough: "Rough terrain"
+  default_camera: tracking
+  cameras:
+    tracking: "Third-person tracking"
+    robot_front_camera: "Robot front camera"
+    robot_rear_overhead_camera: "Robot rear overhead camera"
+    robot_top_camera: "Robot top camera"
+  camera_distance: 1.7
+  camera_azimuth: 135
+  camera_elevation: -20
+
+map_spawns:
+  flat:
+    position: [0.0, 0.0, 0.55]
+    quaternion: [1.0, 0.0, 0.0, 0.0]
+  rough:
+    position: [0.0, 0.0, 0.55]
+    quaternion: [1.0, 0.0, 0.0, 0.0]
+
+runtime_randomization:
+  kp: [108.0, 132.0]
+  kd: [2.7, 3.3]
+  torque_limit: [120.0, 150.0]
+  motor_strength: [0.9, 1.1]
+  motor_delay_ms: [0.0, 15.0]
+  mass_scale: [0.9, 1.1]
+  payload_mass: [0.0, 2.0]
+  friction_scale: [0.5, 1.5]
+  gravity_z: [-10.3, -9.3]
+
+stability_test_push:
+  force_range: [80.0, 180.0]
+  duration_range: [0.10, 0.25]
