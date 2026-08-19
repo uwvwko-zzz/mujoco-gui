@@ -12,7 +12,6 @@ Dog Sim2Sim — IsaacGym → MuJoCo
 import time
 from pathlib import Path
 import sys
-import tempfile
 import mujoco
 import numpy as np
 import onnxruntime as ort
@@ -22,42 +21,40 @@ import yaml
 # 所有仓库内资源都从本文件定位，运行时不依赖当前工作目录或本机绝对路径。
 DEMO_DIR = Path(__file__).resolve().parent
 RUNTIME_CONTROL_DIR = DEMO_DIR.parent
-MUJOCO_DIR = RUNTIME_CONTROL_DIR.parent
-if str(MUJOCO_DIR) not in sys.path:
-    sys.path.insert(0, str(MUJOCO_DIR))
+PACKAGE_SRC = RUNTIME_CONTROL_DIR / "src"
+try:
+    from runtime_control import (
+        MotorCommandDelay,
+        RuntimeScene,
+        bundled_map_specs,
+        compute_pd_torques,
+        make_runtime_config,
+        make_standard_robot_cameras,
+        scale_torque_limits,
+        setup_tracking_camera,
+        standard_camera_options,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "runtime_control":
+        raise
+    sys.path.insert(0, str(PACKAGE_SRC))
+    from runtime_control import (
+        MotorCommandDelay,
+        RuntimeScene,
+        bundled_map_specs,
+        compute_pd_torques,
+        make_runtime_config,
+        make_standard_robot_cameras,
+        scale_torque_limits,
+        setup_tracking_camera,
+        standard_camera_options,
+    )
 
-from runtime_control import (
-    MapSpec,
-    MotorCommandDelay,
-    RuntimeControl,
-    compose_scene,
-    compute_pd_torques,
-    make_runtime_config,
-    make_standard_robot_cameras,
-    scale_torque_limits,
-    setup_tracking_camera,
-    standard_camera_options,
-    viewer_context,
-)
 
-
-MAP_DIR = RUNTIME_CONTROL_DIR / "maps"
 DEFAULT_CONFIG = DEMO_DIR / "dog.yaml"
 DEFAULT_ONNX = DEMO_DIR / "model_3400.onnx"
 DEFAULT_ROBOT_XML = DEMO_DIR / "dog" / "xml" / "dog_terrain.xml"
-MAP_SPECS = {
-    "rc26_track": MapSpec(MAP_DIR / "26rc_track.xml", exclude_bodies=("trunk",)),
-    "race_track": MapSpec(MAP_DIR / "race_track.xml"),
-    "stairs": MapSpec(MAP_DIR / "stairs.xml"),
-    "cross_stairs": MapSpec(MAP_DIR / "cross_stairs.xml"),
-    "cross_slope": MapSpec(MAP_DIR / "cross_slope.xml"),
-    "google_barkour": MapSpec(MAP_DIR / "google_barkour.xml"),
-    "gap_jump": MapSpec(MAP_DIR / "gap_jump.xml"),
-    "hurdles": MapSpec(MAP_DIR / "hurdles.xml"),
-    "suspended_steps": MapSpec(MAP_DIR / "suspended_steps.xml"),
-    "perlin_rough": MapSpec(MAP_DIR / "perlin_rough.xml"),
-    "dynamic_obstacles": MapSpec(MAP_DIR / "dynamic_obstacles.xml"),
-}
+MAP_SPECS = bundled_map_specs()
 
 # 由 compose_scene 注入 trunk，位置和朝向随机器人运动。
 ROBOT_CAMERAS = make_standard_robot_cameras(prefix="dog")
@@ -466,27 +463,21 @@ if __name__ == "__main__":
     print(f"  tau_limits: hip/thigh={TAU_LIMIT_HIP_THIGH}, calf={TAU_LIMIT_CALF}")
     print(f"{'='*60}")
 
-    # 把 Dog 机器人和 runtime_control 中的所有地图编译进同一个临时 MJCF，
-    # 后续切图只切换 geom，无需重新加载模型。
-    scene_temp_dir = tempfile.TemporaryDirectory(prefix="dog_mujoco_runtime_")
-    combined_xml = Path(scene_temp_dir.name) / "dog_all_maps.xml"
-    compose_scene(
+    # RuntimeScene 统一持有临时 MJCF、模型、数据和浏览器运行时。
+    scene = RuntimeScene(
         robot_xml=DEFAULT_ROBOT_XML,
         map_specs=MAP_SPECS,
-        output_path=combined_xml,
+        runtime_config=runtime_config,
         robot_body_name="trunk",
         robot_cameras=ROBOT_CAMERAS,
-    )
-
-    mj_model = mujoco.MjModel.from_xml_path(str(combined_xml))
-    mj_model.opt.timestep = simulation_dt
-    mj_data = mujoco.MjData(mj_model)
-    runtime = RuntimeControl(
-        runtime_config,
-        map_names=MAP_SPECS,
-        base_body_name="trunk",
         dynamic_obstacle_map="dynamic_obstacles",
+        output_name="dog_all_maps.xml",
     )
+    scene.open()
+    mj_model = scene.model
+    mj_model.opt.timestep = simulation_dt
+    mj_data = scene.data
+    runtime = scene.runtime
     motor_delay = MotorCommandDelay(simulation_dt)
 
     print(f"\n[验证] MuJoCo joint 顺序:")
@@ -544,10 +535,8 @@ if __name__ == "__main__":
     print(f"  R:蹲下↓ F:站起↑ Z:重置高度(默认 0.25m)")
     print(f"  [按住移动，松手即停] evdev 全局监听, Wayland/X11 通用\n")
 
-    display = viewer_context(
+    display = scene.viewer(
         args.gui or args.headless,
-        mj_model,
-        mj_data,
         key_callback=key_callback,
     )
     with display as viewer:
@@ -698,6 +687,5 @@ if __name__ == "__main__":
             if simulation_dt - elapsed > 0:
                 time.sleep(simulation_dt - elapsed)
 
-    runtime.close()
-    scene_temp_dir.cleanup()
+    scene.close()
     print("\n[INFO] 仿真结束")

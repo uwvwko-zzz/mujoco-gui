@@ -3,6 +3,7 @@ runtime_ui:
   title: "My Robot MuJoCo Runtime Control"
   host: 127.0.0.1
   port: 8765
+  stop_on_panel_close: true
   width: 640                  # MuJoCo render pixels; CSS enlarges the display
   height: 480
   fps: 120
@@ -43,3 +44,9 @@ runtime_randomization:
 stability_test_push:
   force_range: [80.0, 180.0]
   duration_range: [0.10, 0.25]
+
+# make_runtime_config() arguments represented here for reference.
+runtime_random_seed: 1
+runtime_snapshot_path: runtime_preset.json
+runtime_parameters:
+  wheel_velocity_kp: 1.5

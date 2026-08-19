@@ -1,7 +1,7 @@
 """Robot-independent MJCF terrain composition and runtime map switching."""
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -18,10 +18,27 @@ class MapSpec:
 
     path: Path
     exclude_bodies: tuple = ()
+    minimum_box_half_thickness: float = None
+    contact_params: dict = field(default_factory=dict)
+    strict: bool = True
 
     def __post_init__(self):
         object.__setattr__(self, "path", Path(self.path).expanduser().resolve())
         object.__setattr__(self, "exclude_bodies", tuple(self.exclude_bodies))
+        thickness = self.minimum_box_half_thickness
+        if thickness is not None and float(thickness) < 0:
+            raise ValueError("minimum_box_half_thickness must be >= 0")
+        allowed = {
+            "condim", "friction", "solref", "solimp", "margin", "gap",
+            "priority", "contype", "conaffinity",
+        }
+        contact_params = {
+            str(name): str(value) for name, value in self.contact_params.items()
+        }
+        unknown = sorted(set(contact_params) - allowed)
+        if unknown:
+            raise ValueError("unsupported contact parameters: " + ", ".join(unknown))
+        object.__setattr__(self, "contact_params", contact_params)
 
 
 def _vector(text):
@@ -96,6 +113,48 @@ def _normalize_specs(map_specs):
     return normalized
 
 
+def _imported_world_elements(map_name, map_root, map_spec):
+    source_world = map_root.find("worldbody")
+    if source_world is None:
+        raise ValueError("Map %r has no worldbody: %s" % (map_name, map_spec.path))
+    excluded = set(map_spec.exclude_bodies)
+    imported = []
+    for element in source_world:
+        if element.tag not in {"geom", "body"}:
+            continue
+        if element.tag == "body" and element.get("name") in excluded:
+            continue
+        imported.append(element)
+    if not imported:
+        raise ValueError("Map %r has no terrain elements after exclusions" % map_name)
+    if map_spec.strict:
+        for element in imported:
+            if element.tag == "body" and (
+                element.findall(".//joint") or element.findall(".//freejoint")
+            ):
+                raise ValueError(
+                    "Map %r is not terrain-only: imported body contains a joint" % map_name
+                )
+    return imported
+
+
+def validate_model_dimensions(model, expected, label="composed scene"):
+    """Raise when a compiled map changes the robot's nq/nv/nu dimensions."""
+    if hasattr(expected, "nq"):
+        dimensions = (int(expected.nq), int(expected.nv), int(expected.nu))
+    else:
+        dimensions = tuple(int(value) for value in expected)
+    actual = (int(model.nq), int(model.nv), int(model.nu))
+    if len(dimensions) != 3:
+        raise ValueError("expected dimensions must be (nq, nv, nu)")
+    if actual != dimensions:
+        raise ValueError(
+            "%s changed robot dimensions: expected nq/nv/nu=%s, got %s"
+            % (label, dimensions, actual)
+        )
+    return actual
+
+
 def compose_scene(
     robot_xml,
     map_specs,
@@ -115,8 +174,16 @@ def compose_scene(
     specs = _normalize_specs(map_specs)
     robot_root = ET.parse(robot_xml).getroot()
     map_roots = {name: ET.parse(spec.path).getroot() for name, spec in specs.items()}
-    for root in map_roots.values():
-        thicken_thin_collision_boxes(root, minimum_box_half_thickness)
+    imported_elements = {}
+    for name, root in map_roots.items():
+        imported_elements[name] = _imported_world_elements(
+            name, root, specs[name]
+        )
+        thickness = specs[name].minimum_box_half_thickness
+        if thickness is None:
+            thickness = minimum_box_half_thickness
+        if thickness:
+            thicken_thin_collision_boxes(root, float(thickness))
 
     compiler = robot_root.find("compiler")
     if compiler is None:
@@ -139,18 +206,12 @@ def compose_scene(
         source_asset = map_root.find("asset")
         if source_asset is None:
             continue
-        source_world = map_root.find("worldbody")
-        excluded = set(specs[map_name].exclude_bodies)
         source_geoms = []
-        if source_world is not None:
-            for world_element in source_world:
-                if world_element.tag == "geom":
-                    source_geoms.append(world_element)
-                elif (
-                    world_element.tag == "body"
-                    and world_element.get("name") not in excluded
-                ):
-                    source_geoms.extend(world_element.findall(".//geom"))
+        for world_element in imported_elements[map_name]:
+            if world_element.tag == "geom":
+                source_geoms.append(world_element)
+            else:
+                source_geoms.extend(world_element.findall(".//geom"))
         used_assets = {
             "material": {geom.get("material") for geom in source_geoms if geom.get("material")},
             "mesh": {geom.get("mesh") for geom in source_geoms if geom.get("mesh")},
@@ -210,27 +271,30 @@ def compose_scene(
         worldbody.append(element)
 
     for map_name, map_root in map_roots.items():
-        source_world = map_root.find("worldbody")
-        if source_world is None:
-            continue
         geom_index = 0
         body_index = 0
-        excluded = set(specs[map_name].exclude_bodies)
-        for element in source_world:
-            if element.tag not in {"geom", "body"}:
-                continue
-            if element.tag == "body" and element.get("name") in excluded:
-                continue
+        site_index = 0
+        camera_index = 0
+        for element in imported_elements[map_name]:
             copied = deepcopy(element)
             if copied.tag == "body":
                 for body in [copied, *copied.findall(".//body")]:
                     body.set("name", f"mapbody_{map_name}_{body_index}")
                     body_index += 1
+                for site in copied.findall(".//site"):
+                    site.set("name", f"mapsite_{map_name}_{site_index}")
+                    site_index += 1
+                for camera in copied.findall(".//camera"):
+                    camera.set("name", f"mapcamera_{map_name}_{camera_index}")
+                    camera_index += 1
             geoms = [copied] if copied.tag == "geom" else copied.findall(".//geom")
             refs = asset_maps.get(map_name, {})
             for geom in geoms:
                 geom.set("name", f"{MAP_GEOM_PREFIX}{map_name}_{geom_index}")
                 geom_index += 1
+                if geom.get("contype", "1") != "0" and geom.get("conaffinity", "1") != "0":
+                    for attr, value in specs[map_name].contact_params.items():
+                        geom.set(attr, value)
                 for attr, asset_type in (
                     ("material", "material"),
                     ("mesh", "mesh"),

@@ -9,24 +9,40 @@ from copy import deepcopy
 
 import mujoco
 
+from .panel import (
+    DEFAULT_SCHEMA,
+    ParameterSpec,
+    merge_parameter_schema,
+    normalize_actions,
+)
+
 
 class BrowserOnlyLoop:
     """Viewer-shaped context used when the browser is the only display."""
+
+    def __init__(self, running=None):
+        self._running = running
+        self._closed = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self._closed = True
         return False
 
     def is_running(self):
-        return True
+        return not self._closed and (
+            self._running is None or bool(self._running())
+        )
 
     def sync(self):
         pass
 
 
-def viewer_context(browser_gui, model, data, key_callback=None):
+def viewer_context(
+    browser_gui, model, data, key_callback=None, runtime=None, running=None,
+):
     """Return mutually exclusive browser-only or native-viewer contexts.
 
     ``RuntimeControl`` owns browser rendering.  Starting a passive native
@@ -34,7 +50,10 @@ def viewer_context(browser_gui, model, data, key_callback=None):
     of unexpectedly low frame rates.
     """
     if browser_gui:
-        return BrowserOnlyLoop()
+        callback = running
+        if callback is None and runtime is not None:
+            callback = runtime.is_running
+        return BrowserOnlyLoop(callback)
     import mujoco.viewer
 
     return mujoco.viewer.launch_passive(
@@ -131,6 +150,12 @@ def make_runtime_config(
     tracking_camera=None,
     randomization=None,
     push=None,
+    parameters=None,
+    actions=None,
+    random_seed=None,
+    snapshot_path=None,
+    stop_on_panel_close=True,
+    host="127.0.0.1",
 ):
     """Build the complete config shape required by ``RuntimeControl``.
 
@@ -162,6 +187,14 @@ def make_runtime_config(
     }
     tracking_cfg.update(tracking_camera or {})
     camera_labels = dict(cameras or {"tracking": "第三人称跟随"})
+    parameter_specs = []
+    runtime_parameters = {}
+    for item in parameters or ():
+        spec = item if isinstance(item, ParameterSpec) else ParameterSpec(**dict(item))
+        parameter_specs.append(spec)
+        runtime_parameters[spec.key] = float(spec.default)
+    parameter_schema = merge_parameter_schema(DEFAULT_SCHEMA, parameter_specs)
+    custom_actions = normalize_actions(actions)
     config = {
         "_runtime_gui": bool(gui),
         "simulation": {
@@ -182,8 +215,9 @@ def make_runtime_config(
         },
         "runtime_ui": {
             "title": str(title),
-            "host": "127.0.0.1",
+            "host": str(host),
             "port": int(port),
+            "stop_on_panel_close": bool(stop_on_panel_close),
             "default_map": next(iter(map_labels), None),
             "maps": map_labels,
             "default_camera": next(iter(camera_labels), None),
@@ -192,6 +226,13 @@ def make_runtime_config(
             **tracking_cfg,
         },
         "map_spawns": spawns,
+        "runtime_parameters": runtime_parameters,
+        "runtime_parameter_schema": parameter_schema,
+        "runtime_actions": custom_actions,
+        "runtime_random_seed": random_seed,
+        "runtime_snapshot_path": (
+            str(snapshot_path) if snapshot_path is not None else None
+        ),
         "runtime_randomization": deepcopy(randomization or {}),
         "stability_test_push": deepcopy(
             push or {"force_range": [80.0, 180.0], "duration_range": [0.10, 0.25]}

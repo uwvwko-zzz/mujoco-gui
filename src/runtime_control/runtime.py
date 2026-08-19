@@ -77,10 +77,16 @@ class RuntimeControl:
                 ui_config=ui_cfg,
                 randomization=config.get("runtime_randomization", {}),
                 schema=self._schema(),
+                actions=config.get("runtime_actions", {}),
+                random_seed=config.get("runtime_random_seed"),
+                snapshot_path=config.get("runtime_snapshot_path"),
             )
             self.panel.open_browser()
 
-        self._rng = np.random.default_rng()
+        random_seed = config.get("runtime_random_seed")
+        self._rng = np.random.default_rng(
+            None if random_seed is None else int(random_seed) + 1
+        )
         randomizers = {}
         if dynamic_obstacle_map:
             randomizers[dynamic_obstacle_map] = (
@@ -96,6 +102,8 @@ class RuntimeControl:
         self.default_map = ui_cfg.get("default_map", next(iter(map_names), None))
         self.pending_map = self.default_map
         self.reset_requested = False
+        self.pending_actions = set()
+        self.stop_event = threading.Event()
 
         self.push_requested = False
         self.push_force = np.zeros(3, dtype=np.float64)
@@ -117,13 +125,14 @@ class RuntimeControl:
         self.render_lock = threading.Lock()
         self.render_qpos = None
         self.render_thread_started = False
+        self.render_thread = None
         self.browser_render_failed = False
         self.browser_camera_mode = ui_cfg.get("default_camera", "tracking")
 
     def _initial_state(self):
         command = self.config["command"]
         control = self.config["control"]
-        return {
+        state = {
             "linear_x": abs(float(command.get("linear_x", 0.0))),
             "linear_y": abs(float(command.get("linear_y", 0.0))),
             "yaw": abs(float(command.get("yaw", 0.0))),
@@ -138,9 +147,16 @@ class RuntimeControl:
             "friction_scale": 1.0,
             "gravity_z": float(self.config["simulation"].get("gravity_z", -9.81)),
         }
+        state.update({
+            name: float(value)
+            for name, value in self.config.get("runtime_parameters", {}).items()
+        })
+        return state
 
     def _schema(self):
-        schema = deepcopy(DEFAULT_SCHEMA)
+        schema = deepcopy(
+            self.config.get("runtime_parameter_schema", DEFAULT_SCHEMA)
+        )
         height_range = self.config.get("observation", {}).get("height_range")
         if height_range and len(height_range) == 2:
             schema["commands"][3][2:4] = height_range
@@ -175,11 +191,28 @@ class RuntimeControl:
             self.panel.randomize()
         if "nominal" in actions:
             self.panel.restore_nominal()
+        if "save_snapshot" in actions:
+            try:
+                target = self.panel.save_snapshot()
+                print(f"[UI] runtime snapshot saved: {target}")
+            except (OSError, ValueError) as exc:
+                print(f"[UI] failed to save runtime snapshot: {exc}")
+        if "load_snapshot" in actions:
+            try:
+                target = self.panel.load_snapshot()
+                print(f"[UI] runtime snapshot loaded: {target}")
+            except (OSError, ValueError, TypeError) as exc:
+                print(f"[UI] failed to load runtime snapshot: {exc}")
         if "stop" in actions:
             with self.panel.lock:
                 self.panel.pressed_keys.clear()
             for name in ("linear_x", "linear_y", "yaw"):
                 command[name] = 0.0
+        builtins = {
+            "push", "reset", "randomize", "nominal", "stop",
+            "save_snapshot", "load_snapshot",
+        }
+        self.pending_actions.update(actions - builtins)
         selected_map = self.panel.consume_map_change()
         if selected_map is not None:
             self.pending_map = selected_map
@@ -193,6 +226,24 @@ class RuntimeControl:
         requested = self.reset_requested
         self.reset_requested = False
         return requested
+
+    def consume_actions(self):
+        """Return and clear custom browser actions registered by the host."""
+        actions = set(self.pending_actions)
+        self.pending_actions.clear()
+        return actions
+
+    def is_running(self):
+        return not self.stop_event.is_set() and (
+            self.panel is None or self.panel.is_running()
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
 
     def sync_height_to_panel(self):
         if self.panel is not None:
@@ -316,20 +367,30 @@ class RuntimeControl:
             self.render_qpos = data.qpos.copy()
         if not self.render_thread_started:
             self.render_thread_started = True
-            threading.Thread(
+            self.render_thread = threading.Thread(
                 target=self._render_loop, args=(model,), daemon=True
-            ).start()
+            )
+            self.render_thread.start()
 
     def _render_loop(self, model):
         ui_cfg = self.config.get("runtime_ui", {})
         period = 1.0 / max(1.0, float(ui_cfg.get("fps", 120.0)))
+        renderer = None
         try:
             with self.model_lock:
+                render_width = int(ui_cfg.get("width", 640))
+                render_height = int(ui_cfg.get("height", 480))
+                model.vis.global_.offwidth = max(
+                    int(model.vis.global_.offwidth), render_width
+                )
+                model.vis.global_.offheight = max(
+                    int(model.vis.global_.offheight), render_height
+                )
                 render_data = mujoco.MjData(model)
                 renderer = mujoco.Renderer(
                     model,
-                    height=int(ui_cfg.get("height", 480)),
-                    width=int(ui_cfg.get("width", 640)),
+                    height=render_height,
+                    width=render_width,
                 )
                 camera = mujoco.MjvCamera()
                 mujoco.mjv_defaultCamera(camera)
@@ -340,7 +401,7 @@ class RuntimeControl:
             camera.distance = float(ui_cfg.get("camera_distance", 1.7))
             camera.azimuth = float(ui_cfg.get("camera_azimuth", 135))
             camera.elevation = float(ui_cfg.get("camera_elevation", -20))
-            while True:
+            while self.is_running():
                 started = time.monotonic()
                 if self.panel.wants_frames():
                     with self.render_lock:
@@ -365,9 +426,19 @@ class RuntimeControl:
                 if remaining > 0:
                     time.sleep(remaining)
         except Exception as exc:
-            self.browser_render_failed = True
-            print(f"[UI] browser MuJoCo renderer failed: {exc}")
+            if self.is_running():
+                self.browser_render_failed = True
+                print(f"[UI] browser MuJoCo renderer failed: {exc}")
+        finally:
+            if renderer is not None:
+                renderer.close()
 
     def close(self):
+        self.stop_event.set()
         if self.panel is not None:
-            self.panel.close_browser()
+            self.panel.close()
+        if (
+            self.render_thread is not None
+            and self.render_thread is not threading.current_thread()
+        ):
+            self.render_thread.join(timeout=2.0)
