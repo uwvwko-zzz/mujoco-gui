@@ -1,8 +1,28 @@
-# MuJoCo Runtime Control：快速移植与 AI 适配指南
+# MuJoCo Runtime Control 2.0
 
-`runtime_control` 是一套与策略、机器人型号和关节顺序解耦的 MuJoCo 运行期组件。轮足混合控制适配可参考 `mujoco/w1w/play_gui.py`。
+`runtime_control` 是一套与策略、机器人型号和关节顺序解耦的 MuJoCo 运行期组件。
 
-它提供浏览器画面、键盘命令、地图切换、机载相机、实时 PD 参数、电机延迟、质量/摩擦/重力调整、随机推力、随机化、重置和急停。
+它提供浏览器画面、可视化地图编辑、键盘命令、鼠标视角、地图切换、机载相机、实时 PD 参数、电机延迟、质量/摩擦/重力调整、随机推力、随机化、重置和急停。
+
+## 快速开始
+
+```bash
+git clone https://github.com/uwvwko-zzz/mujoco-gui.git
+cd mujoco-gui
+python -m pip install -e .
+./start_editor.sh
+```
+
+打开 <http://127.0.0.1:8765/>。仓库内的 `eg/dog` 是默认自包含演示，
+使用 `1920×1080` 渲染、JPEG 质量 96 和 60 FPS。
+
+### 2.0 主要更新
+
+- 可视化地图编辑、保存、重新载入、修改和删除；
+- 16 种参数化障碍，包括楼梯、斜坡、碎石、跷跷板和旋转杆；
+- 一键将当前地形交给 Dog + ONNX 进行 MuJoCo 验证；
+- 浏览器画面支持鼠标拖动旋转、平移和滚轮缩放；
+- 编辑器可直接退出，并停止它启动的 MuJoCo 预览进程。
 
 ## 1. 文件与公共接口
 
@@ -28,7 +48,7 @@ runtime_control/
 推荐在目标 Python 环境中以可编辑方式安装：
 
 ```bash
-python -m pip install -e mujoco/mujoco-gui
+python -m pip install -e .
 ```
 
 新适配优先从包入口导入，不要引用内部文件：
@@ -41,13 +61,14 @@ from runtime_control import (
     compute_pd_torques, make_runtime_config,
     make_standard_robot_cameras, scale_torque_limits,
     setup_tracking_camera, standard_camera_options, viewer_context,
-)```
+)
+```
 
 目录本身可以叫 `mujoco-gui`，安装后稳定的 Python 包名仍是
 `runtime_control`。
 
-依赖方向是单向的：用户项目导入 `runtime_control`，包内不反向导入
-W1W、Dog、ONNX 或任何训练框架。观测构造、关节映射、策略推理和执行器
+依赖方向是单向的：用户项目导入 `runtime_control`，核心包不反向导入
+Dog、ONNX 或任何训练框架。观测构造、关节映射、策略推理和执行器
 始终留在用户项目中。
 
 ### 1.1 生成可回放场景
@@ -91,11 +112,10 @@ MuJoCo `hfield` geom。
 mujoco-scene-editor --output generated/visual_course
 ```
 
-本仓库中可直接使用一键脚本，它会设置源码路径并使用已安装 MuJoCo/ONNX
-的 `gym` Python 环境：
+本仓库中可直接使用一键脚本，它会使用当前激活的 Python 环境：
 
 ```bash
-./mujoco/mujoco-gui/start_editor.sh
+./start_editor.sh
 ```
 
 可在后面追加参数覆盖默认值，例如 `--port 9000 --preview-port 9001`。需要
@@ -111,11 +131,8 @@ mujoco-scene-editor --output generated/visual_course
 场景，并会先请求确认。“用演示机器人在 MuJoCo 展示”会先保存当前场景，
 再以仓库内自包含的 `eg/dog` XML 和 ONNX 策略在新标签页启动仿真。
 可通过 `--preview-player`、`--robot-xml`、`--policy`、`--python` 和
-`--preview-port` 接入其他机器人。W1W 项目专用集成请使用：
-
-```bash
-./mujoco/w1w/start_editor.sh
-```
+`--preview-port` 接入其他机器人。W1W 等用户项目的 XML、策略和
+适配器保留在各自项目中，不是本插件的默认资源。
 
 ## 2. 移植前必须查清的事实
 
@@ -456,14 +473,14 @@ runtime.sync_stop_to_panel()
 先执行静态检查，再用实际环境编译组合 MJCF：
 
 ```bash
-python -m py_compile mujoco/mujoco-gui/src/runtime_control/*.py mujoco/<robot>/play.py
-python -m unittest discover -s mujoco/mujoco-gui/tests -v
+python -m py_compile src/runtime_control/*.py eg/play.py
+python -m unittest discover -s tests -v
 ```
 
 ## 9. 可直接交给 AI 的任务模板
 
 ```text
-请把 mujoco/runtime_control 接入 <目标入口脚本>。
+请把 runtime_control 接入 <目标入口脚本>。
 
 要求：
 1. 先读 runtime_control/README_zh.md、目标入口、策略配置和机器人 MJCF；

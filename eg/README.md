@@ -28,29 +28,29 @@ pip install evdev
 浏览器控制面板：
 
 ```bash
-python mujoco/runtime_control/eg/play.py --gui
+python eg/play.py --gui
 ```
 
 原生 MuJoCo viewer：
 
 ```bash
-python mujoco/runtime_control/eg/play.py
+python eg/play.py
 ```
 
 无窗口快速验证：
 
 ```bash
-python mujoco/runtime_control/eg/play.py --headless --duration 1
+python eg/play.py --headless --duration 1
 ```
 
 使用其他策略：
 
 ```bash
-python mujoco/runtime_control/eg/play.py --gui --onnx path/to/model.onnx
+python eg/play.py --gui --onnx path/to/model.onnx
 ```
 
 其他参数可通过以下命令查看：
 
 ```bash
-python mujoco/runtime_control/eg/play.py --help
+python eg/play.py --help
 ```
