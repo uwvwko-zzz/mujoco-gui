@@ -1,6 +1,7 @@
 """Portable runtime control core for MuJoCo locomotion players."""
 
 from copy import deepcopy
+import re
 import threading
 import time
 
@@ -9,6 +10,41 @@ import numpy as np
 
 from .map_manager import MapManager, randomize_box_obstacles
 from .panel import DEFAULT_SCHEMA, RuntimeControlPanel, encode_rgb_jpeg
+
+
+def apply_browser_camera_moves(camera, moves):
+    """Apply normalized browser drags to a MuJoCo free camera in place."""
+    for action, dx, dy in moves:
+        if action == "rotate":
+            camera.azimuth = (float(camera.azimuth) - dx * 180.0) % 360.0
+            # Match direct-manipulation viewers: drag the mouse down to look up.
+            camera.elevation = float(np.clip(camera.elevation - dy * 120.0, -89.0, 89.0))
+        elif action == "zoom":
+            camera.distance = float(np.clip(
+                camera.distance * np.exp(dy * 2.5), 0.1, 100.0
+            ))
+        elif action == "pan":
+            azimuth = np.radians(float(camera.azimuth))
+            elevation = np.radians(float(camera.elevation))
+            right = np.array([np.cos(azimuth), np.sin(azimuth), 0.0])
+            up = np.array([
+                -np.sin(azimuth) * np.sin(elevation),
+                np.cos(azimuth) * np.sin(elevation),
+                np.cos(elevation),
+            ])
+            scale = max(0.1, float(camera.distance)) * 1.5
+            camera.lookat[:] += scale * (-dx * right + dy * up)
+
+
+def _quat_multiply(left, right):
+    lw, lx, ly, lz = left
+    rw, rx, ry, rz = right
+    return np.asarray([
+        lw*rw - lx*rx - ly*ry - lz*rz,
+        lw*rx + lx*rw + ly*rz - lz*ry,
+        lw*ry - lx*rz + ly*rw + lz*rx,
+        lw*rz + lx*ry - ly*rx + lz*rw,
+    ])
 
 
 class RuntimeKeyboardMixin:
@@ -81,7 +117,8 @@ class RuntimeControl:
                 random_seed=config.get("runtime_random_seed"),
                 snapshot_path=config.get("runtime_snapshot_path"),
             )
-            self.panel.open_browser()
+            if ui_cfg.get("open_browser", True):
+                self.panel.open_browser()
 
         random_seed = config.get("runtime_random_seed")
         self._rng = np.random.default_rng(
@@ -124,10 +161,13 @@ class RuntimeControl:
         self.model_lock = threading.RLock()
         self.render_lock = threading.Lock()
         self.render_qpos = None
+        self.render_mocap_pos = None
+        self.render_mocap_quat = None
         self.render_thread_started = False
         self.render_thread = None
         self.browser_render_failed = False
         self.browser_camera_mode = ui_cfg.get("default_camera", "tracking")
+        self.dynamic_mocap_obstacles = None
 
     def _initial_state(self):
         command = self.config["command"]
@@ -273,11 +313,45 @@ class RuntimeControl:
                     simulation["initial_quaternion"] = list(spawn["quaternion"])
                 self.reset_requested = True
 
+        self._animate_dynamic_obstacles(model, data)
         state = self.panel.snapshot() if self.panel is not None else self._initial_state()
         self._apply_model_parameters(model, data, state)
         if self.panel is not None:
             self._publish_frame(model, data)
         return state
+
+    def _animate_dynamic_obstacles(self, model, data):
+        if self.dynamic_mocap_obstacles is None:
+            items = []
+            for body_id in range(model.nbody):
+                mocap_id = int(model.body_mocapid[body_id])
+                if mocap_id < 0:
+                    continue
+                name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+                seesaw = re.search(r"dynamic_seesaw_\d+_a(\d+)_s(\d+)", name)
+                rotating = re.search(r"dynamic_rotating_bar_\d+_s(\d+)", name)
+                if seesaw:
+                    items.append({
+                        "kind": "seesaw", "id": mocap_id,
+                        "amplitude": int(seesaw.group(1)) / 1000.0,
+                        "speed": int(seesaw.group(2)) / 1000.0,
+                        "quat": data.mocap_quat[mocap_id].copy(),
+                    })
+                elif rotating:
+                    items.append({
+                        "kind": "rotating_bar", "id": mocap_id,
+                        "speed": int(rotating.group(1)) / 1000.0,
+                        "quat": data.mocap_quat[mocap_id].copy(),
+                    })
+            self.dynamic_mocap_obstacles = items
+        for item in self.dynamic_mocap_obstacles:
+            if item["kind"] == "seesaw":
+                angle = item["amplitude"] * np.sin(item["speed"] * data.time)
+                local = np.asarray([np.cos(angle/2), 0, np.sin(angle/2), 0])
+            else:
+                angle = item["speed"] * data.time
+                local = np.asarray([np.cos(angle/2), 0, 0, np.sin(angle/2)])
+            data.mocap_quat[item["id"]] = _quat_multiply(item["quat"], local)
 
     def _apply_model_parameters(self, model, data, state):
         if self._base_mass is None:
@@ -365,6 +439,8 @@ class RuntimeControl:
             return
         with self.render_lock:
             self.render_qpos = data.qpos.copy()
+            self.render_mocap_pos = data.mocap_pos.copy()
+            self.render_mocap_quat = data.mocap_quat.copy()
         if not self.render_thread_started:
             self.render_thread_started = True
             self.render_thread = threading.Thread(
@@ -404,18 +480,31 @@ class RuntimeControl:
             while self.is_running():
                 started = time.monotonic()
                 if self.panel.wants_frames():
+                    camera_moves = self.panel.consume_camera_moves()
+                    if camera_moves:
+                        apply_browser_camera_moves(camera, camera_moves)
+                        with self.render_lock:
+                            self.browser_camera_mode = "free"
                     with self.render_lock:
                         qpos = None if self.render_qpos is None else self.render_qpos.copy()
+                        mocap_pos = None if self.render_mocap_pos is None else self.render_mocap_pos.copy()
+                        mocap_quat = None if self.render_mocap_quat is None else self.render_mocap_quat.copy()
                         camera_mode = self.browser_camera_mode
                     if qpos is not None:
                         with self.model_lock:
                             render_data.qpos[:] = qpos
+                            if mocap_pos is not None:
+                                render_data.mocap_pos[:] = mocap_pos
+                                render_data.mocap_quat[:] = mocap_quat
                             mujoco.mj_forward(model, render_data)
                             if camera_mode == "tracking":
                                 camera.lookat[:] = render_data.xpos[base_id]
                             renderer.update_scene(
                                 render_data,
-                                camera=camera if camera_mode == "tracking" else camera_mode,
+                                camera=(
+                                    camera if camera_mode in {"tracking", "free"}
+                                    else camera_mode
+                                ),
                             )
                             frame = encode_rgb_jpeg(
                                 renderer.render(),

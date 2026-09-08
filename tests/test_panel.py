@@ -65,6 +65,19 @@ class PanelTests(unittest.TestCase):
         self.assertTrue(panel.stop_event.wait(2.0))
         self.assertFalse(panel.is_running())
 
+    def test_camera_mouse_movement_is_validated_and_consumed(self):
+        panel = self.make_panel()
+        self.post(panel, "/api/camera_move", {
+            "action": "rotate", "dx": 0.25, "dy": -0.1,
+        })
+        self.assertEqual(panel.selected_camera, "free")
+        self.assertEqual(panel.consume_camera_moves(), [("rotate", 0.25, -0.1)])
+        self.assertEqual(panel.consume_camera_moves(), [])
+        with self.assertRaises(HTTPError) as error:
+            self.post(panel, "/api/camera_move", {"action": "teleport"})
+        self.assertEqual(error.exception.code, 400)
+        panel.close()
+
 
 if __name__ == "__main__":
     unittest.main()

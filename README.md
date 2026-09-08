@@ -19,6 +19,7 @@ runtime_control/
 │   ├── integration.py          # 相机、viewer、配置工厂
 │   ├── runtime.py / panel.py   # 运行时与浏览器 UI
 │   ├── map_manager.py          # MJCF 合并、切图和出生点
+│   ├── scene_builder.py        # 可复现地形、参数化障碍和场景 JSON
 │   ├── control.py              # 电机延迟、PD 与力矩限制
 │   └── maps/                   # 随 wheel 发布的 terrain-only 资源
 └── eg/ / tests/                 # 可运行示例与回归测试
@@ -48,6 +49,73 @@ from runtime_control import (
 依赖方向是单向的：用户项目导入 `runtime_control`，包内不反向导入
 W1W、Dog、ONNX 或任何训练框架。观测构造、关节映射、策略推理和执行器
 始终留在用户项目中。
+
+### 1.1 生成可回放场景
+
+`scene_builder` 将场景源数据和运行时地图分开：`scene.json` 用于编辑、
+版本管理和失败回放，`terrain.xml` 仍是可由 `RuntimeScene` 安全合并的
+terrain-only MJCF。
+
+```python
+from runtime_control import ObstacleSpec, SceneSpec, TerrainSpec, scene_map_spec
+
+scene = SceneSpec(
+    name="rough_course",
+    terrain=TerrainSpec(kind="noise", seed=42, length=12, width=8),
+    obstacles=[
+        ObstacleSpec("stairs", x=2.0, params={"count": 6, "rise": 0.12}),
+        ObstacleSpec("gap", x=5.0, params={"gap": 0.35}),
+        ObstacleSpec("stepping_stones", x=7.0, params={"count": 8}),
+    ],
+)
+generated = scene_map_spec(scene, "generated/rough_course")
+scene_runtime = RuntimeScene.for_adapter(
+    adapter, ROBOT_XML, {"rough": generated}, runtime_config
+)
+```
+
+基础地形支持 `flat/slope/stairs/noise`；障碍支持 `platform/wall/stairs/gap/`
+`stepping_stones/slalom/ramp/side_slope/speed_bumps/hurdles/narrow_bridge/`
+`wave_ground/uneven_stairs/random_blocks/seesaw/rotating_bar`。随机地形由
+`seed` 复现，导出的非平地使用单个
+MuJoCo `hfield` geom。
+
+`seesaw` 和 `rotating_bar` 使用 MuJoCo mocap body 生成动态碰撞几何；它们由运行时
+根据仿真时间驱动，不会增加机器人的 `nq/nv/nu`。
+
+### 1.2 可视化地图编辑器
+
+安装本包后启动本地浏览器编辑器：
+
+```bash
+mujoco-scene-editor --output generated/visual_course
+```
+
+本仓库中可直接使用一键脚本，它会设置源码路径并使用已安装 MuJoCo/ONNX
+的 `gym` Python 环境：
+
+```bash
+./mujoco/mujoco-gui/start_editor.sh
+```
+
+可在后面追加参数覆盖默认值，例如 `--port 9000 --preview-port 9001`。需要
+使用其他 Python 时，设置 `HIMLOCO_EDITOR_PYTHON=/path/to/python`。
+
+页面左侧选择障碍类型，在中间俯视场地单击添加，拖动已有对象可修改位置；
+右侧可修改地形、坐标、旋转和障碍参数。点击“生成 MuJoCo 场景”会向
+`--output` 目录写入 `scene.json` 和 `terrain.xml`，非平地额外写入
+`terrain.png`。如果不想自动打开浏览器，使用 `--no-browser`。
+
+编辑器左侧“已有地形”可载入之前保存的 `scene.json`，载入后可继续拖动、
+修改和覆盖保存。“删除当前已保存地形”只删除 `--output` 范围内当前选中
+场景，并会先请求确认。“用演示机器人在 MuJoCo 展示”会先保存当前场景，
+再以仓库内自包含的 `eg/dog` XML 和 ONNX 策略在新标签页启动仿真。
+可通过 `--preview-player`、`--robot-xml`、`--policy`、`--python` 和
+`--preview-port` 接入其他机器人。W1W 项目专用集成请使用：
+
+```bash
+./mujoco/w1w/start_editor.sh
+```
 
 ## 2. 移植前必须查清的事实
 

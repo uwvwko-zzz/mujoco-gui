@@ -279,7 +279,10 @@ def compose_scene(
             copied = deepcopy(element)
             if copied.tag == "body":
                 for body in [copied, *copied.findall(".//body")]:
-                    body.set("name", f"mapbody_{map_name}_{body_index}")
+                    source_name = body.get("name", "body")
+                    body.set(
+                        "name", f"mapbody_{map_name}_{body_index}_{source_name}"
+                    )
                     body_index += 1
                 for site in copied.findall(".//site"):
                     site.set("name", f"mapsite_{map_name}_{site_index}")

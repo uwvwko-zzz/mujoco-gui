@@ -25,6 +25,7 @@ PACKAGE_SRC = RUNTIME_CONTROL_DIR / "src"
 try:
     from runtime_control import (
         MotorCommandDelay,
+        MapSpec,
         RuntimeScene,
         bundled_map_specs,
         compute_pd_torques,
@@ -40,6 +41,7 @@ except ModuleNotFoundError as exc:
     sys.path.insert(0, str(PACKAGE_SRC))
     from runtime_control import (
         MotorCommandDelay,
+        MapSpec,
         RuntimeScene,
         bundled_map_specs,
         compute_pd_torques,
@@ -309,14 +311,14 @@ def reset_robot(model, data, default_angles_mujoco, position=None, quaternion=No
     mujoco.mj_forward(model, data)
 
 
-def build_runtime_config(args, kps, kds):
+def build_runtime_config(args, kps, kds, map_specs):
     """把 Dog 的扁平策略配置适配成 runtime_control 使用的结构。"""
     map_spawns = {
         name: {
             "position": [0.0, 0.0, 0.42],
             "quaternion": [1.0, 0.0, 0.0, 0.0],
         }
-        for name in MAP_SPECS
+        for name in map_specs
     }
     map_spawns["rc26_track"] = {
         "position": [3.7, -9.0, 0.45],
@@ -339,7 +341,9 @@ def build_runtime_config(args, kps, kds):
         "perlin_rough": "Perlin崎岖地形",
         "dynamic_obstacles": "动态随机障碍赛道",
     }
-    return make_runtime_config(
+    if "custom" in map_specs:
+        map_labels["custom"] = "可视化编辑器场景"
+    config = make_runtime_config(
         gui=args.gui,
         title="Dog MuJoCo 实时调参",
         maps=map_labels,
@@ -347,12 +351,19 @@ def build_runtime_config(args, kps, kds):
         kp=kps[0],
         kd=kds[0],
         torque_limit=TAU_LIMIT_CALF,
-        initial_position=map_spawns["rc26_track"]["position"],
-        initial_quaternion=map_spawns["rc26_track"]["quaternion"],
+        initial_position=map_spawns[args.map]["position"],
+        initial_quaternion=map_spawns[args.map]["quaternion"],
         command=(1.0, 1.0, 1.0, 0.25),
         height_range=(0.2, 0.35),
         cameras=CAMERA_OPTIONS,
         port=args.gui_port,
+        open_browser=not args.no_open_browser,
+        render={
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "jpeg_quality": 96,
+        },
         tracking_camera={
             "camera_distance": 2.0,
             "camera_azimuth": 135.0,
@@ -374,6 +385,8 @@ def build_runtime_config(args, kps, kds):
             "duration_range": [0.10, 0.25],
         },
     )
+    config["runtime_ui"]["default_map"] = args.map
+    return config
 
 
 if __name__ == "__main__":
@@ -385,6 +398,15 @@ if __name__ == "__main__":
         type=Path,
         default=DEFAULT_ONNX,
         help="ONNX 路径（默认使用 eg/model_3400.onnx）",
+    )
+    parser.add_argument("--xml", type=Path, default=DEFAULT_ROBOT_XML)
+    parser.add_argument(
+        "--map", default="rc26_track",
+        help="初始地图；预览编辑器地形时使用 custom",
+    )
+    parser.add_argument(
+        "--custom-map", type=Path,
+        help="可视化地图编辑器导出的 terrain-only MJCF",
     )
     parser.add_argument("--no-policy", action="store_true")
     parser.add_argument(
@@ -408,11 +430,29 @@ if __name__ == "__main__":
         help="只启用浏览器实时调参面板（不打开原生 MuJoCo viewer）",
     )
     parser.add_argument("--gui-port", type=int, default=8765, help="浏览器面板端口")
+    parser.add_argument(
+        "--no-open-browser", action="store_true",
+        help="启动浏览器面板服务，但不再自动打开新窗口",
+    )
     args = parser.parse_args()
     if args.gui and args.headless:
         parser.error("--gui 和 --headless 不能同时使用")
     if args.duration is not None and args.duration <= 0:
         parser.error("--duration 必须大于 0")
+
+    args.xml = args.xml.expanduser().resolve()
+    if not args.xml.is_file():
+        parser.error("找不到机器人 XML: %s" % args.xml)
+    map_specs = dict(MAP_SPECS)
+    if args.custom_map is not None:
+        args.custom_map = args.custom_map.expanduser().resolve()
+        if not args.custom_map.is_file():
+            parser.error("找不到自定义地图: %s" % args.custom_map)
+        map_specs["custom"] = MapSpec(args.custom_map)
+    if args.map not in map_specs:
+        parser.error("未知地图 %r，可选: %s" % (
+            args.map, ", ".join(sorted(map_specs))
+        ))
 
     config_path = DEFAULT_CONFIG
     policy_path = (
@@ -437,7 +477,7 @@ if __name__ == "__main__":
     dof_vel_scale  = config["dof_vel_scale"]
     cmd_scale      = np.array(config["cmd_scale"], dtype=np.float32)
     clip_obs       = config.get("clip_obs", 100.0)
-    runtime_config = build_runtime_config(args, kps, kds)
+    runtime_config = build_runtime_config(args, kps, kds, map_specs)
 
     # 力矩限制: hip/thigh=23.7, calf=35.55 (MuJoCo 顺序)
     tau_limits_mujoco = np.array([
@@ -465,12 +505,14 @@ if __name__ == "__main__":
 
     # RuntimeScene 统一持有临时 MJCF、模型、数据和浏览器运行时。
     scene = RuntimeScene(
-        robot_xml=DEFAULT_ROBOT_XML,
-        map_specs=MAP_SPECS,
+        robot_xml=args.xml,
+        map_specs=map_specs,
         runtime_config=runtime_config,
         robot_body_name="trunk",
         robot_cameras=ROBOT_CAMERAS,
-        dynamic_obstacle_map="dynamic_obstacles",
+        dynamic_obstacle_map=(
+            "dynamic_obstacles" if "dynamic_obstacles" in map_specs else None
+        ),
         output_name="dog_all_maps.xml",
     )
     scene.open()

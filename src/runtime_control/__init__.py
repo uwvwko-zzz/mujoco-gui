@@ -38,6 +38,18 @@ from .resources import (
     bundled_map_specs,
 )
 from .session import RuntimeScene
+from .scene_builder import (
+    OBSTACLE_KINDS,
+    TERRAIN_KINDS,
+    ObstacleSpec,
+    SceneSpec,
+    TerrainSpec,
+    export_scene_map,
+    generate_heightfield,
+    load_scene_spec,
+    save_scene_spec,
+    scene_map_spec,
+)
 
 __all__ = [
     "ActionSpec",
@@ -55,6 +67,11 @@ __all__ = [
     "RuntimeScene",
     "RuntimeKeyboardMixin",
     "RuntimeControlPanel",
+    "OBSTACLE_KINDS",
+    "TERRAIN_KINDS",
+    "ObstacleSpec",
+    "SceneSpec",
+    "TerrainSpec",
     "build_panel_html",
     "available_bundled_maps",
     "bundled_map_path",
@@ -63,11 +80,16 @@ __all__ = [
     "compose_scene",
     "compute_pd_torques",
     "encode_rgb_jpeg",
+    "export_scene_map",
+    "generate_heightfield",
+    "load_scene_spec",
     "merge_parameter_schema",
     "randomize_box_obstacles",
     "make_runtime_config",
     "make_standard_robot_cameras",
     "scale_torque_limits",
+    "save_scene_spec",
+    "scene_map_spec",
     "setup_tracking_camera",
     "standard_camera_options",
     "thicken_thin_collision_boxes",

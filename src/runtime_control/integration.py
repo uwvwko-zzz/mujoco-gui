@@ -155,6 +155,7 @@ def make_runtime_config(
     random_seed=None,
     snapshot_path=None,
     stop_on_panel_close=True,
+    open_browser=True,
     host="127.0.0.1",
 ):
     """Build the complete config shape required by ``RuntimeControl``.
@@ -218,6 +219,7 @@ def make_runtime_config(
             "host": str(host),
             "port": int(port),
             "stop_on_panel_close": bool(stop_on_panel_close),
+            "open_browser": bool(open_browser),
             "default_map": next(iter(map_labels), None),
             "maps": map_labels,
             "default_camera": next(iter(camera_labels), None),
